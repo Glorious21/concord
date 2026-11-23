@@ -1263,6 +1263,50 @@ export class Concord {
       });
   }
 
+  /**
+   * What changed between two reconciliations of one asset, yesterday's against today's say.
+   * Breaks are matched by `key`: `new` ones appear only in the later run, `resolved` ones only
+   * in the earlier, and of those in both, `changed` ones have a different `fingerprint` (the
+   * figures moved) while `persisting` ones do not. Every list is sorted by key.
+   */
+  diffRuns(fromId: number, toId: number) {
+    const load = (id: number) => {
+      const row = this.db.get("SELECT id, asset_id, as_of, result FROM runs WHERE id = ?", id);
+      if (!row) throw new NotFound(`reconciliation ${id} not found`);
+      const breaks = new Map<string, StoredBreak>();
+      for (const b of (JSON.parse(String(row.result)) as RunResult).breaks) breaks.set(b.key, b);
+      return { assetId: String(row.asset_id), ref: { runId: id, asOf: String(row.as_of) }, breaks };
+    };
+    const from = load(fromId);
+    const to = load(toId);
+    if (from.assetId !== to.assetId) {
+      throw new Invalid(`reconciliations ${fromId} and ${toId} are of different assets`);
+    }
+    const byKey = (a: { key: string }, b: { key: string }) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0);
+    const added: StoredBreak[] = [];
+    const resolved: StoredBreak[] = [];
+    const persisting: StoredBreak[] = [];
+    const changed: Array<{ key: string; type: string; from: StoredBreak; to: StoredBreak }> = [];
+    for (const [key, after] of to.breaks) {
+      const before = from.breaks.get(key);
+      if (!before) added.push(after);
+      else if (before.fingerprint === after.fingerprint) persisting.push(after);
+      else changed.push({ key, type: after.type, from: before, to: after });
+    }
+    for (const [key, before] of from.breaks) if (!to.breaks.has(key)) resolved.push(before);
+    for (const list of [added, resolved, persisting, changed]) list.sort(byKey);
+    return {
+      assetId: from.assetId,
+      from: from.ref,
+      to: to.ref,
+      summary: { new: added.length, resolved: resolved.length, persisting: persisting.length, changed: changed.length },
+      new: added,
+      resolved,
+      persisting,
+      changed,
+    };
+  }
+
   /** The newest reconciliation of one register, if it has been reconciled. */
   latestRunForRegister(registerId: number) {
     const row = this.db.get<{ id: number }>("SELECT id FROM runs WHERE register_id = ? ORDER BY id DESC LIMIT 1", registerId);

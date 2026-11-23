@@ -295,6 +295,83 @@ describe("Concord", () => {
     expect(concord.registers("FUND")).toHaveLength(2);
   });
 
+  it("diffs two reconciliation runs into new, resolved, persisting and changed breaks by key", async () => {
+    await concord.sync("FUND");
+    // Chain: h1 90 (active), h2 55 (frozen). Yesterday the register has h2 short and a holder
+    // for h3, who holds nothing; today h2 is short by less, h3 is gone and h1 is marked frozen.
+    // E has no account on either day, with the same units.
+    const yesterday = concord.importRegister("FUND", {
+      csv: `holder_id,account,units,status\nA,${h1},90,active\nB,${h2},50,frozen\nC,${h3},10,active\nE,,3,\n`,
+      asOf: at(40),
+    });
+    const today = concord.importRegister("FUND", {
+      csv: `holder_id,account,units,status\nA,${h1},90,frozen\nB,${h2},52,frozen\nE,,3,\n`,
+      asOf: at(41),
+    });
+    const first = await concord.reconcile("FUND", yesterday.registerId);
+    const second = await concord.reconcile("FUND", today.registerId);
+
+    const diff = concord.diffRuns(first.id, second.id);
+    expect(diff.from).toEqual({ runId: first.id, asOf: at(40) });
+    expect(diff.to).toEqual({ runId: second.id, asOf: at(41) });
+    expect(diff.new.map((b) => b.key)).toContain(`STATUS_MISMATCH:${h1}`);
+    expect(diff.resolved.map((b) => b.key)).toContain(`MISSING_ON_CHAIN:${h3}`);
+    expect(diff.persisting.map((b) => b.key)).toContain("UNMAPPED_HOLDER:E");
+    const quantity = diff.changed.find((c) => c.key === `QUANTITY_MISMATCH:${h2}`);
+    expect(quantity).toMatchObject({
+      type: "QUANTITY_MISMATCH",
+      from: { registerUnits: "50" },
+      to: { registerUnits: "52" },
+    });
+
+    // Every break of either run lands in exactly one class, and each list is sorted by key.
+    const keys = (breaks: { key: string }[]) => breaks.map((b) => b.key);
+    const before = new Set(keys(first.breaks));
+    const after = new Set(keys(second.breaks));
+    expect(keys(diff.new).sort()).toEqual([...after].filter((k) => !before.has(k)).sort());
+    expect(keys(diff.resolved).sort()).toEqual([...before].filter((k) => !after.has(k)).sort());
+    expect([...keys(diff.persisting), ...keys(diff.changed)].sort()).toEqual(
+      [...after].filter((k) => before.has(k)).sort(),
+    );
+    for (const list of [diff.new, diff.resolved, diff.persisting, diff.changed]) {
+      expect(keys(list)).toEqual([...keys(list)].sort());
+    }
+    expect(diff.summary).toEqual({
+      new: diff.new.length,
+      resolved: diff.resolved.length,
+      persisting: diff.persisting.length,
+      changed: diff.changed.length,
+    });
+
+    // Reversed, new and resolved swap; persisting stays.
+    const back = concord.diffRuns(second.id, first.id);
+    expect(keys(back.new)).toEqual(keys(diff.resolved));
+    expect(keys(back.resolved)).toEqual(keys(diff.new));
+    expect(keys(back.persisting)).toEqual(keys(diff.persisting));
+
+    // A run against itself: everything persists.
+    expect(concord.diffRuns(second.id, second.id).summary).toEqual({
+      new: 0,
+      resolved: 0,
+      persisting: second.breaks.length,
+      changed: 0,
+    });
+  });
+
+  it("refuses to diff reconciliation runs of different assets, or one that does not exist", async () => {
+    const other = await concord.watchAsset({ network: "testnet", asset: `OTHER:${key()}`, fromLedger: 1 });
+    const csv = `holder_id,account,units\nA,${h1},90\n`;
+    const mine = await concord.reconcile("FUND", concord.importRegister("FUND", { csv, asOf: at(40) }).registerId);
+    const theirs = await concord.reconcile(
+      other.id,
+      concord.importRegister(other.id, { csv, asOf: at(40) }).registerId,
+    );
+    expect(() => concord.diffRuns(mine.id, theirs.id)).toThrow(
+      new Invalid(`reconciliations ${mine.id} and ${theirs.id} are of different assets`),
+    );
+    expect(() => concord.diffRuns(mine.id, 99_999)).toThrow(new NotFound("reconciliation 99999 not found"));
+  });
+
   it("rounds holder shares half up to four decimals so two thirds and one third add to 100", async () => {
     const asset = await concord.watchAsset({ network: "testnet", asset: `THIRDS:${key()}`, fromLedger: 1 });
     chain.push(asset.id, "mint", 3, { to: h1, amount: u(2) });
