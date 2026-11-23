@@ -295,6 +295,106 @@ describe("Concord", () => {
     expect(concord.registers("FUND")).toHaveLength(2);
   });
 
+  it("diffs two registers by holder id: added, removed and changed holders, each sorted", () => {
+    const yesterday = concord.importRegister("FUND", {
+      csv: [
+        "holder_id,holder_name,account,units,status",
+        `D,Dora,${h1},10,active`,
+        `A,Ann,${h1},90,active`,
+        `C,Cy,${h2},5,active`,
+        `E,Eve,${h3},7,active`,
+        // Split over two lines: compared on the sum and the set of accounts.
+        `B,Bo,${h2},30,active`,
+        `B,Bo,${h3},20,active`,
+        `F,Flo,,1,`,
+      ].join("\n"),
+      asOf: at(40),
+    });
+    const today = concord.importRegister("FUND", {
+      csv: [
+        "holder_id,holder_name,account,units,status",
+        `Z,Zed,${h3},4,active`,
+        `A,Ann,${h1},90,active`,
+        `B,Bo,${h3},20,active`,
+        `B,Bo,${h2},30,active`,
+        `C,Cy,${h2},5.5,active`,
+        `E,Eve,${h1},7,frozen`,
+        `F,Flo,${h2},1,`,
+        `G,Gus,${h3},2,active`,
+      ].join("\n"),
+      asOf: at(41),
+    });
+
+    const diff = concord.diffRegisters("FUND", yesterday.registerId, today.registerId);
+    expect(diff.from).toEqual({ registerId: yesterday.registerId, asOf: at(40) });
+    expect(diff.to).toEqual({ registerId: today.registerId, asOf: at(41) });
+    expect(diff.summary).toEqual({ added: 2, removed: 1, changed: 3, unchanged: 2 });
+    expect(diff.added).toEqual([
+      { holderId: "G", holderName: "Gus", units: "2", accounts: [h3], statuses: ["active"] },
+      { holderId: "Z", holderName: "Zed", units: "4", accounts: [h3], statuses: ["active"] },
+    ]);
+    expect(diff.removed).toEqual([
+      { holderId: "D", holderName: "Dora", units: "10", accounts: [h1], statuses: ["active"] },
+    ]);
+    expect(diff.changed).toEqual([
+      {
+        holderId: "C",
+        holderName: "Cy",
+        fields: ["units"],
+        unitsDelta: "0.5",
+        from: { units: "5", accounts: [h2], statuses: ["active"] },
+        to: { units: "5.5", accounts: [h2], statuses: ["active"] },
+      },
+      {
+        holderId: "E",
+        holderName: "Eve",
+        fields: ["accounts", "statuses"],
+        unitsDelta: "0",
+        from: { units: "7", accounts: [h3], statuses: ["active"] },
+        to: { units: "7", accounts: [h1], statuses: ["frozen"] },
+      },
+      {
+        holderId: "F",
+        holderName: "Flo",
+        fields: ["accounts"],
+        unitsDelta: "0",
+        from: { units: "1", accounts: [], statuses: [] },
+        to: { units: "1", accounts: [h2], statuses: [] },
+      },
+    ]);
+
+    // The other way round, removals and additions swap and deltas change sign.
+    const back = concord.diffRegisters("FUND", today.registerId, yesterday.registerId);
+    expect(back.summary).toEqual({ added: 1, removed: 2, changed: 3, unchanged: 2 });
+    expect(back.changed.find((c) => c.holderId === "C")?.unitsDelta).toBe("-0.5");
+    // Line order in the file does not decide the result order.
+    expect(back.removed.map((r) => r.holderId)).toEqual(["G", "Z"]);
+  });
+
+  it("finds nothing to report between a register and itself", () => {
+    const reg = concord.importRegister("FUND", {
+      csv: `holder_id,account,units\nA,${h1},90\nB,${h2},55\n`,
+      asOf: at(40),
+    });
+    expect(concord.diffRegisters("FUND", reg.registerId, reg.registerId)).toMatchObject({
+      summary: { added: 0, removed: 0, changed: 0, unchanged: 2 },
+      added: [],
+      removed: [],
+      changed: [],
+    });
+  });
+
+  it("rejects a register of another asset, and one that does not exist", async () => {
+    const other = await concord.watchAsset({ network: "testnet", asset: `OTHER:${key()}`, fromLedger: 1 });
+    const mine = concord.importRegister("FUND", { csv: `holder_id,account,units\nA,${h1},90\n`, asOf: at(40) });
+    const theirs = concord.importRegister(other.id, { csv: `holder_id,account,units\nA,${h1},90\n`, asOf: at(40) });
+    expect(() => concord.diffRegisters("FUND", mine.registerId, theirs.registerId)).toThrow(
+      new Invalid(`register ${theirs.registerId} belongs to a different asset`),
+    );
+    expect(() => concord.diffRegisters("FUND", theirs.registerId, mine.registerId)).toThrow(Invalid);
+    expect(() => concord.diffRegisters("FUND", mine.registerId, 99_999)).toThrow(new NotFound("no register 99999"));
+  });
+
   it("rounds holder shares half up to four decimals so two thirds and one third add to 100", async () => {
     const asset = await concord.watchAsset({ network: "testnet", asset: `THIRDS:${key()}`, fromLedger: 1 });
     chain.push(asset.id, "mint", 3, { to: h1, amount: u(2) });

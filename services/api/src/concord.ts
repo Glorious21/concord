@@ -924,6 +924,85 @@ export class Concord {
     return { runs };
   }
 
+  /**
+   * What the transfer agent changed between two registers of one asset, independently of the
+   * chain: holders added and removed, and holders whose units, accounts or statuses differ.
+   * Keyed by `holder_id`; a holder listed on several lines is compared on the sum of its units
+   * and the set of its accounts and statuses. Every list is sorted by holder id.
+   */
+  diffRegisters(ref: string, fromId: number, toId: number) {
+    const asset = this.asset(ref);
+    const load = (registerId: number) => {
+      const reg = this.db.get("SELECT id, asset_id, as_of FROM registers WHERE id = ?", registerId);
+      if (!reg) throw new NotFound(`no register ${registerId}`);
+      if (String(reg.asset_id) !== asset.id) throw new Invalid(`register ${registerId} belongs to a different asset`);
+      const holders = new Map<string, { name?: string; units: bigint; accounts: Set<string>; statuses: Set<string> }>();
+      for (const p of this.registerPositions(registerId)) {
+        const h = holders.get(p.holderId) ?? { units: 0n, accounts: new Set<string>(), statuses: new Set<string>() };
+        h.units += p.units;
+        if (p.holderName && h.name === undefined) h.name = p.holderName;
+        if (p.account) h.accounts.add(p.account);
+        if (p.status) h.statuses.add(p.status);
+        holders.set(p.holderId, h);
+      }
+      return { ref: { registerId, asOf: String(reg.as_of) }, holders };
+    };
+    const from = load(fromId);
+    const to = load(toId);
+    const sorted = (s: Set<string>) => [...s].sort();
+    const view = (h: { units: bigint; accounts: Set<string>; statuses: Set<string> }) => ({
+      units: formatUnits(h.units, asset.decimals),
+      accounts: sorted(h.accounts),
+      statuses: sorted(h.statuses),
+    });
+    const same = (a: Set<string>, b: Set<string>) => a.size === b.size && [...a].every((x) => b.has(x));
+    const byId = (a: { holderId: string }, b: { holderId: string }) =>
+      a.holderId < b.holderId ? -1 : a.holderId > b.holderId ? 1 : 0;
+
+    const added = [];
+    const removed = [];
+    const changed = [];
+    let unchanged = 0;
+    for (const [holderId, h] of to.holders) {
+      if (!from.holders.has(holderId)) added.push({ holderId, holderName: h.name ?? null, ...view(h) });
+    }
+    for (const [holderId, before] of from.holders) {
+      const after = to.holders.get(holderId);
+      if (!after) {
+        removed.push({ holderId, holderName: before.name ?? null, ...view(before) });
+        continue;
+      }
+      const fields: Array<"units" | "accounts" | "statuses"> = [];
+      if (before.units !== after.units) fields.push("units");
+      if (!same(before.accounts, after.accounts)) fields.push("accounts");
+      if (!same(before.statuses, after.statuses)) fields.push("statuses");
+      if (fields.length === 0) {
+        unchanged++;
+        continue;
+      }
+      changed.push({
+        holderId,
+        holderName: after.name ?? before.name ?? null,
+        fields,
+        unitsDelta: formatUnits(after.units - before.units, asset.decimals),
+        from: view(before),
+        to: view(after),
+      });
+    }
+    added.sort(byId);
+    removed.sort(byId);
+    changed.sort(byId);
+    return {
+      asset: { id: asset.id, code: asset.code },
+      from: from.ref,
+      to: to.ref,
+      summary: { added: added.length, removed: removed.length, changed: changed.length, unchanged },
+      added,
+      removed,
+      changed,
+    };
+  }
+
   private registerPositions(registerId: number): RegisterPosition[] {
     return this.db.all("SELECT * FROM register_positions WHERE register_id = ?", registerId).map((r) => {
       const p: RegisterPosition = { holderId: String(r.holder_id), units: BigInt(String(r.units)) };
