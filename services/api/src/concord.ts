@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   buildControlsLog,
+  dividendBreakdown,
   dividendEntitlements,
   formatUnits,
   observeFlows,
@@ -15,6 +16,8 @@ import {
   splitDeltas,
   toCsv,
   type AssetEvent,
+  type DividendAmounts,
+  type DividendTerms,
   type EventKind,
   type ExpectedFlows,
   type HoldingsState,
@@ -115,6 +118,10 @@ export interface ActionInput {
   /** Dividend: paying agent. Without one, mints of the pay asset are counted. */
   payer?: string;
   rounding?: Rounding;
+  /** Dividend: share of the gross the payer withholds, a decimal from 0 to 1 such as "0.15". */
+  withholdingRate?: string;
+  /** Dividend: per-address withholding rates that replace `withholdingRate`. */
+  withholdingOverrides?: Record<string, string>;
   /** Split ratio or redemption fraction. */
   num?: string;
   den?: string;
@@ -1419,6 +1426,27 @@ export class Concord {
         throw new Invalid("rounding must be floor or half-up");
       }
       params.rounding = input.rounding ?? "floor";
+      const fraction = (value: unknown, field: string): string => {
+        if (typeof value !== "string" || !/^(0(\.\d+)?|1(\.0+)?)$/.test(value)) {
+          throw new Invalid(`${field} must be a decimal from 0 to 1, such as 0.15`);
+        }
+        return value;
+      };
+      if (input.withholdingRate !== undefined) {
+        params.withholdingRate = fraction(input.withholdingRate, "withholdingRate");
+      }
+      if (input.withholdingOverrides !== undefined) {
+        const given = input.withholdingOverrides;
+        if (given === null || typeof given !== "object" || Array.isArray(given) || Object.keys(given).length > 500) {
+          throw new Invalid("withholdingOverrides must map addresses to rates");
+        }
+        const overrides: Record<string, string> = {};
+        for (const [key, value] of Object.entries(given)) {
+          const holder = address(key, "a withholdingOverrides address")!;
+          overrides[holder] = fraction(value, `withholdingOverrides for ${holder}`);
+        }
+        params.withholdingOverrides = overrides;
+      }
     } else if (input.type === "split" || input.type === "redemption") {
       if (!input.num || !input.den || !/^\d+$/.test(input.num) || !/^\d+$/.test(input.den)) {
         throw new Invalid(`${input.type} needs whole-number num and den`);
@@ -1489,7 +1517,10 @@ export class Concord {
   async reconcileAction(id: number, options: { sync?: boolean } = {}) {
     const row = this.db.get("SELECT * FROM actions WHERE id = ?", id);
     if (!row) throw new NotFound(`corporate action ${id} not found`);
-    const params = JSON.parse(String(row.params)) as Record<string, string | string[] | undefined>;
+    const params = JSON.parse(String(row.params)) as Record<
+      string,
+      string | string[] | Record<string, string> | undefined
+    >;
     const type = String(row.type) as ActionType;
     const warnings: string[] = [];
     const refresh = options.sync !== false;
@@ -1529,14 +1560,24 @@ export class Concord {
     let plus: EventKind[];
     let minus: EventKind[] = [];
     const payer = params.payer as string | undefined;
+    // Only a dividend with withholding terms shows gross, withheld and net on its lines.
+    let withholding: Map<string, DividendAmounts> | undefined;
     if (type === "dividend") {
-      expected = dividendEntitlements(snapshot, {
+      const terms: DividendTerms = {
         ratePerUnit: String(params.ratePerUnit),
         baseDecimals: asset.decimals,
         payDecimals: flowAsset.decimals,
         rounding: (params.rounding as Rounding | undefined) ?? "floor",
         exclude,
-      });
+      };
+      if (params.withholdingRate !== undefined) terms.withholdingRate = String(params.withholdingRate);
+      if (params.withholdingOverrides !== undefined) {
+        terms.withholdingOverrides = params.withholdingOverrides as Record<string, string>;
+      }
+      expected = dividendEntitlements(snapshot, terms);
+      if (terms.withholdingRate !== undefined || terms.withholdingOverrides !== undefined) {
+        withholding = dividendBreakdown(snapshot, terms);
+      }
       // A payment made by the pay asset's own issuer surfaces as a mint, not a transfer.
       plus = payer && payer !== flowAsset.issuer ? ["transfer"] : ["mint"];
     } else {
@@ -1583,15 +1624,25 @@ export class Concord {
         difference: flow(recon.summary.difference),
         breakCount: recon.summary.breakCount,
       },
-      lines: recon.lines.map((l) => ({
-        address: l.address,
-        basis: base(l.basis),
-        expected: flow(l.expected),
-        observed: flow(l.observed),
-        difference: flow(l.difference),
-        txHashes: l.txHashes,
-        status: l.status,
-      })),
+      lines: recon.lines.map((l) => {
+        const amounts = withholding?.get(l.address);
+        return {
+          address: l.address,
+          basis: base(l.basis),
+          expected: flow(l.expected),
+          ...(withholding
+            ? {
+                gross: flow(amounts?.gross ?? 0n),
+                withheld: flow(amounts?.withheld ?? 0n),
+                net: flow(amounts?.net ?? 0n),
+              }
+            : {}),
+          observed: flow(l.observed),
+          difference: flow(l.difference),
+          txHashes: l.txHashes,
+          status: l.status,
+        };
+      }),
       breaks: recon.breaks.map((b): StoredBreak => ({
         scope: "distribution",
         type: b.type,
