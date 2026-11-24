@@ -174,6 +174,23 @@ ALTER TABLE assets ADD COLUMN movement_window_hours INTEGER NOT NULL DEFAULT 24;
 `,
   // v5: per-asset reconciliation tolerance (smallest units as TEXT to preserve bigint precision).
   `ALTER TABLE assets ADD COLUMN tolerance TEXT;`,
+  // v6: each asset's headline figures, so the dashboard's polled overview reads one row instead
+  // of replaying events and rebuilding the controls log. Derived data: a missing row is
+  // recomputed on the next read.
+  `
+CREATE TABLE asset_stats (
+  asset_id TEXT PRIMARY KEY REFERENCES assets (id) ON DELETE CASCADE,
+  supply TEXT NOT NULL,
+  holder_count INTEGER NOT NULL,
+  event_count INTEGER NOT NULL,
+  incomplete INTEGER NOT NULL,
+  last_run TEXT,
+  open_reconciliation INTEGER NOT NULL,
+  open_controls INTEGER NOT NULL,
+  open_actions INTEGER NOT NULL,
+  updated_at TEXT NOT NULL
+);
+`,
 ];
 
 /** Identity: who may sign in, and which workspace each session is bound to. */

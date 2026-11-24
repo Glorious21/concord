@@ -57,6 +57,10 @@ Everything to date; Concord's history begins 2026-10 with the commits below.
 - A per-asset reconciliation `tolerance` (smallest units): a holder whose chain and register
   balances differ by no more than it is treated as matched. Schema: `ORG_MIGRATIONS` v5 adds
   `assets.tolerance` (#564).
+- Stored headline figures per asset (#575): the overview and `GET /api/assets/:id` read each
+  asset's supply, holder and event counts and open-break counts from one row, rewritten after
+  every change that moves them, so a poll no longer replays events or rebuilds the controls
+  log. Schema: `ORG_MIGRATIONS` entry 6 adds the `asset_stats` table.
 - CSV templates can include one illustrative example row with `?example=1` or `?example=true` (#200).
 - The accounting core (`feat(core)`, `c402eae`): holdings replay from CAP-67 events, position
   and movement reconciliation with typed breaks, corporate-action entitlements (dividend,

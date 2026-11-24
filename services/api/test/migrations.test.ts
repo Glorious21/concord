@@ -77,6 +77,22 @@ describe("databases written by earlier builds", () => {
     });
   });
 
+  it("adds an empty asset_stats table to a v5 workspace database", () => {
+    upgraded("org-v5.db", ORG_MIGRATIONS, (db) => {
+      expect(db.get<{ n: number }>("SELECT COUNT(*) AS n FROM asset_stats")?.n).toBe(0);
+    });
+  });
+
+  it("opens the v6 workspace database and keeps its stored asset figures", () => {
+    upgraded("org-v6.db", ORG_MIGRATIONS, (db) => {
+      expect(db.get<{ value: string }>("SELECT value FROM meta WHERE key = 'fixture'")?.value).toBe("org-v6");
+      expect(db.get("SELECT supply, open_controls FROM asset_stats WHERE asset_id = 'usd-mainnet'")).toEqual({
+        supply: "1000",
+        open_controls: 1,
+      });
+    });
+  });
+
   it("opens the v1 control database with the current migrations and keeps its rows", () => {
     upgraded("control-v1.db", CONTROL_MIGRATIONS, (db) => {
       expect(db.get<{ name: string }>("SELECT name FROM users WHERE id = 'u1'")?.name).toBe("Alice");
