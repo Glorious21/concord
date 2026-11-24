@@ -40,6 +40,8 @@ Everything to date; Concord's history begins 2026-10 with the commits below.
 
 ### Added
 
+- A printable HTML report of a reconciliation run, with its summary, coverage, register and run
+  digests, and break sign-off history (`GET /api/reconciliations/:id/report`) (#552).
 - `Concord.diffRegisters(asset, fromId, toId)` compares two registers of one asset by
   `holder_id`: holders added and removed, and holders whose units, accounts or statuses changed,
   each list sorted by holder id (#566).
